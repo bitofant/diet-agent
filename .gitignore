@@ -40,8 +40,9 @@ build/Release
 
 # Dependency directories
 node_modules/
-package-lock.json
 jspm_packages/
+# package-lock.json is committed on purpose: this ships as a service, so
+# installs must be reproducible (unlike agent-remote, which ignores it).
 
 # Snowpack dependency directory (https://snowpack.dev/)
 web_modules/
