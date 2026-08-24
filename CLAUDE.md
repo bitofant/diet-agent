@@ -13,7 +13,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - A dieting/food-logging web app. Chat is the *only* input method: the user types what they ate or did in natural language, the app turns it into structured log entries.
 - E.g. "just had 2 hot dogs, regular buns, ketchup and mayo" → a `Lunch · 2:10pm · 350 kcal` entry, expandable to per-item calories.
 - Editing is natural language too: "I didn't just eat lunch, it was an hour ago" → patches that entry's timestamp. Activities are negative-calorie entries ("just went for a 15min walk", "tracked workout, 460 kcal").
-- Single user per account, mobile-first (phone is the primary device — you log food where you eat it).
+- **Multi-tenant**: many users on one deployment, each with a private log. Nothing is shared or social — no feeds, no comparisons, no aggregate views.
+- Mobile-first (phone is the primary device — you log food where you eat it).
 
 ## Project state
 
@@ -40,6 +41,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **`shared/` is the contract**, imported by both sides: entry/day types, the action vocabulary, and the reducer. Same code runs server-side (authoritative state) and client-side (optimistic updates), exactly as agent-remote folds `ChatEvent`s on both ends.
 - **Days are local-day keyed** (`YYYY-MM-DD`), never UTC timestamps. The *client* supplies its `now` + IANA timezone with every chat turn; the server never assumes its own clock is the user's day. "Today"/"yesterday" in the sidebar and "an hour ago" in a prompt both resolve against that.
 - **Hard constraint:** LLM-specific and prompt-specific logic stays in `server/llm/`. The reducer, storage, protocol and UI must stay model-agnostic — swapping the model or provider must not touch them.
+- **Hard constraint:** multi-tenant isolation, enforced in `db.ts`. See Multi-tenancy & privacy below — read it before adding any route, query or cache.
 
 ## Data model (shared/types.ts)
 
@@ -65,7 +67,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Layout (intended)
 
 - `shared/` — `types.ts` (entries/days), `actions.ts` (action vocabulary + validation), `reduce.ts` (pure `applyAction(day, action) → day`), `nutrition.ts` (totals/derived math), `dates.ts` (local-day keys, "today/yesterday" labelling, relative-time resolution).
-- `server/` — `index.ts` (HTTP + WS + dev Vite), `db.ts` (SQLite: users, auth sessions, days, entries, chat messages, llm turns), `auth.ts`, `config.ts`, `llm/` (client + prompt + action decoding), `api.ts` (day read/write routes).
+- `server/` — `index.ts` (HTTP + WS + dev Vite), `db.ts` (SQLite: users, auth sessions, days, entries, chat messages, llm turns — every user-owned accessor takes `userId` first, see Multi-tenancy), `auth.ts`, `config.ts`, `llm/` (client + prompt + action decoding), `api.ts` (day read/write routes).
 - `web/` — `App.tsx` (sidebar + main pane), `DayView.tsx` (the chat/log timeline), `EntryCard.tsx` (collapsed summary → expanded item list), `Composer.tsx`, `History.tsx`, `Settings.tsx`, `client.ts` (WS + optimistic apply), `theme.ts`, `styles.css`.
 - Co-located `*.test.ts`, Node environment. First and most valuable coverage is `shared/` — it's pure, so it's free to test.
 
@@ -115,11 +117,20 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - Keys: `llm` (`provider`/`baseUrl`/`model`/`apiKey?`), `server.port`, `defaults` (kcal target, units).
 - Never reintroduce `process.env`-style config or `.env` files.
 
-## Authentication
+## Multi-tenancy & privacy (hard constraint)
 
-- The whole app is login-gated. `server/auth.ts` owns all of it — scrypt password hashing (`salt:hash`), server-side session tokens in SQLite, set as an **HttpOnly cookie** (never exposed to page JS), plus the auth routes. The rest of the server only asks "who is this request?" via `authedUser()`; every `/api` route and the `/ws` upgrade are gated on it.
-- Every day/entry/message row is **owned by a user id and filtered by it on read**. Food logs are health data; a guessed id must never return another user's day.
-- Keep auth concerns in `auth.ts`; the rest of the code stays auth-agnostic.
+**The app is multi-tenant and the data is health data. No user data is reachable without being logged into that user's account — this outranks every other concern in this file. When a feature and this rule conflict, the feature loses.**
+
+- **Authentication:** the whole app is login-gated. `server/auth.ts` owns all of it — scrypt password hashing (`salt:hash`), server-side session tokens in SQLite, set as an **HttpOnly** (+ `Secure` in prod, `SameSite=Lax`) cookie, never exposed to page JS. The rest of the server only asks "who is this request?" via `authedUser()`. Every `/api` route and the `/ws` upgrade is gated on it — **default-deny**: a new route is unreachable until it opts in, never the reverse. Keep auth concerns in `auth.ts`; the rest of the code stays auth-agnostic.
+- **Scope at the persistence boundary, never at the call site.** Every user-owned table has a `user_id` column, and every `db.ts` accessor takes `userId` as its **first argument** and puts it in the `WHERE` clause. Do not add an unscoped `getEntry(id)` "just for internal use" — one such helper is all it takes, and agent-remote already learned this shape of lesson with folder normalization: enforce it where the data is read, not in each caller that remembers to.
+- **An id from the client is never authorization.** Ownership is proven by the `WHERE user_id = ?` on the same statement that fetches the row — not by a separate fetch-then-compare (forgettable, and a TOCTOU). A wrong/guessed id yields **404, never 403** — a 403 confirms the row exists.
+- **The user comes from the session cookie, never from the request.** No `?user=`, no user id in a path or body, no client-supplied tenant hint anywhere. If a handler reads a user id from input, that's a bug regardless of what it then checks.
+- **Action validation is tenant validation.** `update_entry`/`delete_entry`/`add_item` carry ids the *model* produced from *some* context — resolve every one against the requesting user's own day before the reducer runs, and reject the whole batch if any fails.
+- **LLM requests carry exactly one user's data.** Never batch or cache across users; the prompt is built from the requesting user's day and chat only. A shared/global cache keyed by anything but `(userId, …)` is a leak.
+- **Sending food logs to a hosted model is third-party disclosure of health data.** The local endpoint default exists partly for this. If a hosted provider is configured, that's a deliberate deployment choice — say so in the README/settings, don't bury it.
+- **Logs and diagnostics are user data too.** `llm_turns` (raw prompts + model output) is the most sensitive table in the app: owned, scoped, and pruned like the rest. Never write entry text, prompts or model output to stdout/journald at any level above debug — the systemd journal is not access-controlled the way the DB is.
+- **Cross-tenant access is a required test case, not a nice-to-have.** Every read/write path gets a test that a second user's id cannot reach the first user's day, entry, chat message or llm turn — the analogue of agent-remote pinning path confinement in `files.test.ts`. Add the test with the route, in the same commit.
+- **Account deletion cascades** (days, entries, chat, llm turns, sessions) and export gives a user their own data back. Design the schema with `ON DELETE CASCADE` from the start; retrofitting it is a migration.
 
 ## Deployment (later)
 
