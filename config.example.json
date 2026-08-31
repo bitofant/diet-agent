@@ -1,0 +1,15 @@
+{
+  "llm": {
+    "provider": "vLLM",
+    "baseUrl": "http://localhost:8000/v1",
+    "model": "default"
+  },
+  "server": {
+    "port": 4100
+  },
+  "defaults": {
+    "targetKcal": 2000,
+    "energyUnit": "kcal",
+    "measurementSystem": "metric"
+  }
+}
