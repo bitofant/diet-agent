@@ -18,7 +18,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project state
 
-- **Empty folder — nothing scaffolded yet.** Everything below "Architecture" is intended design, not built. Update this section as slices land.
+- **Built: build/test plumbing + all of `shared/`.** Everything else below is intended design, not built. Update this section as slices land.
+  - Scaffold: `package.json`, `tsconfig*.json`, `vite.config.ts`, `vitest{,.e2e}.config.ts`, `config.example.json`, `config-gen.sh`. `npm test` + `npm run typecheck` are green.
+  - `shared/`: `types.ts`, `dates.ts`, `nutrition.ts`, `actions.ts`, `reduce.ts` — all with co-located tests.
+- **Not built yet:** `server/` (nothing — no `index.ts`, `db.ts`, `auth.ts`, `llm/`), `web/` (nothing), no `index.html`, no `config.json` (run `config-gen.sh`).
+- Two decisions the code settled, worth knowing before touching `shared/`:
+  - **The model never supplies an id.** `add_entry` carries an `EntryDraft` (no `id`/`source`/timestamps); the server fills those via `ReduceContext {now, newId, source}`. Validation rejects an `entry.id` outright.
+  - **Validation is the gate; the reducer is total.** `validateActions` is all-or-nothing and resolves every model-supplied id against the user's own day (that resolution *is* the tenant check). `applyAction` then no-ops on unknown ids rather than throwing, so an optimistic client that's briefly behind degrades to "no visible change".
 - Same stack as the sibling `../agent-remote` project (React + Vite + Node + TypeScript + SQLite + Vitest, single port, `config.json`); reuse its conventions and its `styles.css` design idiom rather than inventing new ones. It is **not** a dependency — copy patterns, not code, and never import across the folders.
 - First vertical slice to aim for: type a meal in chat → LLM returns a structured `add_entry` action → reducer folds it into the day → entry renders in the log, expandable.
 
