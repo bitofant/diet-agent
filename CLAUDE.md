@@ -18,13 +18,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project state
 
-- **Built: build/test plumbing + all of `shared/`.** Everything else below is intended design, not built. Update this section as slices land.
+- **Built: build/test plumbing, all of `shared/`, and the server's persistence + auth layer.** Everything else below is intended design, not built. Update this section as slices land.
   - Scaffold: `package.json`, `tsconfig*.json`, `vite.config.ts`, `vitest{,.e2e}.config.ts`, `config.example.json`, `config-gen.sh`. `npm test` + `npm run typecheck` are green.
   - `shared/`: `types.ts`, `dates.ts`, `nutrition.ts`, `actions.ts`, `reduce.ts` — all with co-located tests.
-- **Not built yet:** `server/` (nothing — no `index.ts`, `db.ts`, `auth.ts`, `llm/`), `web/` (nothing), no `index.html`, no `config.json` (run `config-gen.sh`).
-- Two decisions the code settled, worth knowing before touching `shared/`:
+  - `server/`: `db.ts`, `auth.ts` — with co-located tests, including cross-tenant cases for every read/write path.
+- **Not built yet:** `server/index.ts`, `config.ts`, `api.ts`, `llm/`; `web/` (nothing); no `index.html`, no `config.json` (run `config-gen.sh`).
+- Decisions the code settled, worth knowing before touching `shared/` or `server/`:
   - **The model never supplies an id.** `add_entry` carries an `EntryDraft` (no `id`/`source`/timestamps); the server fills those via `ReduceContext {now, newId, source}`. Validation rejects an `entry.id` outright.
   - **Validation is the gate; the reducer is total.** `validateActions` is all-or-nothing and resolves every model-supplied id against the user's own day (that resolution *is* the tenant check). `applyAction` then no-ops on unknown ids rather than throwing, so an optimistic client that's briefly behind degrades to "no visible change".
+  - **`openDb(path)` is a factory, not a module singleton** (`getDb()` memoizes the process-wide one; tests take `":memory:"`). `auth.ts` takes the `Db` as its first argument for the same reason — every isolation guarantee is testable without a file on disk.
+  - **A day is saved whole** (`writeDay(userId, day)`, one transaction: upsert target, clear the day's entries, re-insert). The reducer returns a whole day, so a row-level diff would be a second source of truth about what the day contains.
+  - **`entries`/`chat_messages` are keyed `PRIMARY KEY (user_id, id)`**, not `id` alone: an id one tenant supplies then cannot address — or clobber via upsert — another tenant's row. Each isolation rule is pinned by a test that fails when the rule is removed (verified by mutation).
 - Same stack as the sibling `../agent-remote` project (React + Vite + Node + TypeScript + SQLite + Vitest, single port, `config.json`); reuse its conventions and its `styles.css` design idiom rather than inventing new ones. It is **not** a dependency — copy patterns, not code, and never import across the folders.
 - First vertical slice to aim for: type a meal in chat → LLM returns a structured `add_entry` action → reducer folds it into the day → entry renders in the log, expandable.
 
